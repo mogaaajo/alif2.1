@@ -243,7 +243,7 @@ const Dashboard = () => {
               const itemScore = getVerifiedScore(item, "score");
               return (
                 <div key={`${item.created_at}-${index}`} className="flex items-center justify-between rounded-xl bg-muted/50 px-4 py-3 text-sm">
-                  <span className="font-medium text-foreground">{item.surah_name || `Surah ${item.surah_number}`} · {item.kind === "assisted_practice" ? "Assisted practice" : item.kind === "memorize" ? "Recitation practice" : item.kind === "recite_along" ? "Recite Along" : "Recitation"}{item.page ? ` · Page ${item.page}` : item.ayah_keys?.length ? ` · ${item.ayah_keys[0]}–${item.ayah_keys[item.ayah_keys.length - 1]}` : ""}</span>
+                  <span className="font-medium text-foreground">{item.surah_name || `Surah ${item.surah_number}`} · {item.kind === "assisted_practice" ? "Assisted practice" : item.kind === "memorize" ? "Recitation practice" : item.kind === "recite_along" ? "Recite Along" : item.kind === "recite_practice" ? "Ayah practice" : item.kind === "group_recitation" ? "Group recitation" : "Recitation"}{item.page ? ` · Page ${item.page}` : item.ayah_keys?.length ? ` · ${item.ayah_keys[0]}–${item.ayah_keys[item.ayah_keys.length - 1]}` : ""}</span>
                   <span className="text-muted-foreground">+{item.xp || 0} XP{itemScore !== null ? ` · ${itemScore}%` : ""}</span>
                 </div>
               );

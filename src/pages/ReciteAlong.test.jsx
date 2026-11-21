@@ -75,3 +75,28 @@ test('setup preserves hands-free default and allows switching to manual mode',as
   expect(submitRecitation).not.toHaveBeenCalled();
 });
 
+test('setup navigation routes to surah Mushaf page without uploading audio or logging premature XP',async()=>{
+  await click('start-along-btn');
+  expect(mockNavigate).toHaveBeenCalledWith('/mushaf/604?mode=along');
+  expect(recorders).toHaveLength(0);
+  expect(submitRecitation).not.toHaveBeenCalled();
+  expect(logPracticeActivity).not.toHaveBeenCalled();
+});
+
+test('unmounting ReciteAlong setup cleans up without triggering audio upload or practice logging',async()=>{
+  await click('mode-manual-btn');
+  await act(async()=>root.unmount());
+  expect(submitRecitation).not.toHaveBeenCalled();
+  expect(logPracticeActivity).not.toHaveBeenCalled();
+  expect(recorders).toHaveLength(0);
+  root=createRoot(container);
+});
+
+test('setup view does not advertise automated pronunciation grading while disabled',()=>{
+  const text = container.textContent || '';
+  expect(text).not.toMatch(/AI pronunciation assessment/i);
+  expect(text).not.toMatch(/Scoring your recitation/i);
+  expect(text).not.toMatch(/Share score/i);
+});
+
+

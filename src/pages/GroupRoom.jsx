@@ -22,14 +22,40 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { useSettings } from "@/context/SettingsContext";
-import { getRoom, joinRoom, startRoom, advanceRoom, getSurah, submitRecitation } from "@/lib/api";
+import { getRoom, joinRoom, startRoom, advanceRoom, getSurah, submitRecitation, logPracticeActivity } from "@/lib/api";
 import {
   AUTOMATED_ASSESSMENT_ENABLED,
   ASSESSMENT_UNAVAILABLE_SUMMARY,
   isVerifiedAssessment,
   getVerifiedScore,
 } from "@/lib/assessment";
+import { ayahKey } from "@/lib/practiceSession";
 import { getUserName, setUserName, getUserId } from "@/lib/user";
+
+const makeEventId = () =>
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `group-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+const resolveGroupAyahIdentity = (ayahObj, roomObj) => {
+  const resolvedSurah = Number(ayahObj?.surahNumber ?? roomObj?.surah_number);
+  const resolvedAyah = Number(ayahObj?.numberInSurah);
+  if (
+    !Number.isInteger(resolvedSurah) ||
+    resolvedSurah < 1 ||
+    resolvedSurah > 114 ||
+    !Number.isInteger(resolvedAyah) ||
+    resolvedAyah < 1
+  ) {
+    return null;
+  }
+  return {
+    surahNumber: resolvedSurah,
+    surahName: ayahObj?.surahName || roomObj?.surah_name || "",
+    ayahNumber: resolvedAyah,
+    key: ayahKey({ surahNumber: resolvedSurah, numberInSurah: resolvedAyah }, resolvedSurah),
+  };
+};
 
 const GroupRoom = () => {
   const { code } = useParams();
@@ -46,6 +72,13 @@ const GroupRoom = () => {
   const mediaRef = useRef(null);
   const chunksRef = useRef([]);
   const streamRef = useRef(null);
+  const mountedRef = useRef(true);
+  const roomRef = useRef(null);
+  const deviceIdRef = useRef(deviceId);
+  const attemptGenRef = useRef(0);
+  const attemptRef = useRef(null);
+  roomRef.current = room;
+  deviceIdRef.current = deviceId;
 
   useEffect(() => {
     if (!deviceId) return;
@@ -80,10 +113,57 @@ const GroupRoom = () => {
   const currentAyah = surahData?.ayahs?.[room?.ayah_index];
   const myName = () => participants.find((p) => p.device_id === deviceId)?.name || "";
 
+  const stopStreamTracks = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+  };
+
+  const cleanupRecording = () => {
+    attemptGenRef.current += 1;
+    attemptRef.current = null;
+    if (mediaRef.current) {
+      mediaRef.current.ondataavailable = null;
+      mediaRef.current.onstop = null;
+      if (mediaRef.current.state !== "inactive") {
+        try {
+          mediaRef.current.stop();
+        } catch {
+          /* ignore */
+        }
+      }
+      mediaRef.current = null;
+    }
+    chunksRef.current = [];
+    stopStreamTracks();
+  };
+
+  const isAttemptTurnStillValid = (attempt) => {
+    const currentRoom = roomRef.current;
+    const currentDevice = deviceIdRef.current;
+    if (!attempt || !currentRoom || currentRoom.status !== "active") return false;
+    if (currentRoom.code !== attempt.roomCode) return false;
+    if (currentRoom.ayah_index !== attempt.ayahIndex) return false;
+    if (currentRoom.turn_index !== attempt.turnIndex) return false;
+    const pts = currentRoom.participants || [];
+    const owner = pts.length ? pts[currentRoom.turn_index % pts.length] : null;
+    return Boolean(owner && owner.device_id === currentDevice && currentDevice === attempt.deviceId);
+  };
+
   useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      cleanupRecording();
+    };
+  }, []);
+
+  useEffect(() => {
+    cleanupRecording();
     setTurnPhase("idle");
     setMyResult(null);
-  }, [room?.ayah_index]);
+  }, [room?.ayah_index, room?.turn_index, room?.status, myTurn]);
 
   const doJoin = async () => {
     if (!joinName.trim()) return toast.error("Enter your name.");
@@ -130,44 +210,120 @@ const GroupRoom = () => {
     }
   };
 
-  const cleanupStream = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-    }
-  };
-  useEffect(() => cleanupStream, []);
-
   const startRec = async () => {
+    if (!myTurn || room?.status !== "active" || turnPhase !== "idle") return;
+    const gen = ++attemptGenRef.current;
+    const attempt = {
+      eventId: makeEventId(),
+      roomCode: room.code,
+      deviceId,
+      turnIndex: room.turn_index,
+      ayahIndex: room.ayah_index,
+      identity: resolveGroupAyahIdentity(currentAyah, room),
+      completed: false,
+      stopping: false,
+    };
+    attemptRef.current = attempt;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!mountedRef.current || gen !== attemptGenRef.current || !isAttemptTurnStillValid(attempt)) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
       streamRef.current = stream;
       chunksRef.current = [];
       const mr = new MediaRecorder(stream);
-      mr.ondataavailable = (e) => e.data.size > 0 && chunksRef.current.push(e.data);
-      mr.onstop = () => submitScore(new Blob(chunksRef.current, { type: "audio/webm" }));
+      if (AUTOMATED_ASSESSMENT_ENABLED) {
+        mr.ondataavailable = (e) => e.data.size > 0 && chunksRef.current.push(e.data);
+        mr.onstop = () => {
+          const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+          chunksRef.current = [];
+          stopStreamTracks();
+          submitScore(blob, gen, attempt);
+        };
+      } else {
+        mr.ondataavailable = null;
+        mr.onstop = () => {
+          chunksRef.current = [];
+          stopStreamTracks();
+          submitScore(null, gen, attempt);
+        };
+      }
       mediaRef.current = mr;
       mr.start();
       setTurnPhase("recording");
     } catch {
+      if (gen === attemptGenRef.current) {
+        attemptRef.current = null;
+        stopStreamTracks();
+      }
       toast.error("Microphone access denied.");
     }
   };
 
   const stopRec = () => {
-    if (mediaRef.current && mediaRef.current.state !== "inactive") mediaRef.current.stop();
-    cleanupStream();
+    if (turnPhase !== "recording") return;
+    const mr = mediaRef.current;
+    if (!mr || mr.state === "inactive" || attemptRef.current?.stopping) return;
+    attemptRef.current.stopping = true;
     setTurnPhase("scoring");
+    mr.stop();
   };
 
-  const submitScore = async (blob) => {
+  const submitScore = async (blob, gen, attempt) => {
+    if (!attempt || attempt.completed || gen !== attemptGenRef.current) return;
+    attempt.completed = true;
+    mediaRef.current = null;
+    chunksRef.current = [];
+    stopStreamTracks();
+
+    if (!isAttemptTurnStillValid(attempt)) {
+      if (mountedRef.current) {
+        setTurnPhase("idle");
+        setMyResult(null);
+      }
+      return;
+    }
+
     if (!AUTOMATED_ASSESSMENT_ENABLED) {
+      let summary;
+      if (!attempt.identity) {
+        summary =
+          "Turn practice finished, but progress could not be logged because verse details were unavailable. Audio was not uploaded or stored, and automated scoring is currently unavailable.";
+      } else {
+        try {
+          const res = await logPracticeActivity({
+            user_id: getUserId(),
+            kind: "group_recitation",
+            surah_number: attempt.identity.surahNumber,
+            surah_name: attempt.identity.surahName,
+            ayah_number: attempt.identity.ayahNumber,
+            ayah_keys: [attempt.identity.key],
+            client_event_id: attempt.eventId,
+          });
+          if (!mountedRef.current || gen !== attemptGenRef.current || !isAttemptTurnStillValid(attempt)) return;
+          if (res?.duplicate === true) {
+            summary =
+              "Turn practice was already recorded for this attempt. Audio was not uploaded or stored, and automated scoring is currently unavailable.";
+          } else if (typeof res?.xp_earned === "number" && res.xp_earned > 0) {
+            summary = `Turn practice saved (+${res.xp_earned} XP). Audio was not uploaded or stored, and automated scoring is currently unavailable.`;
+          } else {
+            summary =
+              "Turn practice saved. Audio was not uploaded or stored, and automated scoring is currently unavailable.";
+          }
+        } catch {
+          if (!mountedRef.current || gen !== attemptGenRef.current || !isAttemptTurnStillValid(attempt)) return;
+          summary =
+            "Turn practice finished, but progress could not be saved right now. Audio was not uploaded or stored, and automated scoring is currently unavailable.";
+        }
+      }
+      if (!mountedRef.current || gen !== attemptGenRef.current || !isAttemptTurnStillValid(attempt)) return;
       setMyResult({
         available: false,
         score_verified: false,
         score: null,
         verdict: null,
-        summary: "Practice recording complete. Automated scoring is currently unavailable.",
+        summary,
       });
       setTurnPhase("reviewed");
       return;
@@ -182,9 +338,11 @@ const GroupRoom = () => {
       fd.append("ayah_number", String((room?.ayah_index || 0) + 1));
       fd.append("user_id", getUserId());
       const res = await submitRecitation(fd);
+      if (!mountedRef.current || gen !== attemptGenRef.current || !isAttemptTurnStillValid(attempt)) return;
       setMyResult(res);
       setTurnPhase("reviewed");
     } catch {
+      if (!mountedRef.current || gen !== attemptGenRef.current) return;
       toast.error("Automated assessment is unavailable. You can still pass your turn.");
       setTurnPhase("idle");
     }
@@ -364,7 +522,7 @@ const GroupRoom = () => {
                           Pass turn
                         </Button>
                         <Button variant="outline" className="rounded-full px-6" onClick={startRec} data-testid="room-record-btn">
-                          <Mic className="mr-2 h-4 w-4" /> Record turn
+                          <Mic className="mr-2 h-4 w-4" /> Practice aloud (mic)
                         </Button>
                       </div>
                       <p className="text-xs text-muted-foreground">
@@ -388,7 +546,7 @@ const GroupRoom = () => {
                   {turnPhase === "scoring" && (
                     <div className="flex flex-col items-center gap-2">
                       <Loader2 className="h-7 w-7 animate-spin text-primary" />
-                      <p className="text-sm text-muted-foreground">Finishing your turn…</p>
+                      <p className="text-sm text-muted-foreground">Saving turn practice…</p>
                     </div>
                   )}
                   {turnPhase === "reviewed" && (() => {

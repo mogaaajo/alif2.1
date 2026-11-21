@@ -9,14 +9,40 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { submitRecitation } from "@/lib/api";
+import { submitRecitation, logPracticeActivity } from "@/lib/api";
 import {
   AUTOMATED_ASSESSMENT_ENABLED,
   ASSESSMENT_UNAVAILABLE_SUMMARY,
   isVerifiedAssessment,
   getVerifiedScore,
 } from "@/lib/assessment";
+import { ayahKey } from "@/lib/practiceSession";
 import { getUserId } from "@/lib/user";
+
+const makeEventId = () =>
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `recite-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+const resolveAyahIdentity = (ayahObj, fallbackSurahNumber, fallbackSurahName) => {
+  const resolvedSurah = Number(ayahObj?.surahNumber ?? fallbackSurahNumber);
+  const resolvedAyah = Number(ayahObj?.numberInSurah);
+  if (
+    !Number.isInteger(resolvedSurah) ||
+    resolvedSurah < 1 ||
+    resolvedSurah > 114 ||
+    !Number.isInteger(resolvedAyah) ||
+    resolvedAyah < 1
+  ) {
+    return null;
+  }
+  return {
+    surahNumber: resolvedSurah,
+    surahName: ayahObj?.surahName || fallbackSurahName || "",
+    ayahNumber: resolvedAyah,
+    key: ayahKey({ surahNumber: resolvedSurah, numberInSurah: resolvedAyah }, resolvedSurah),
+  };
+};
 
 const STATUS_COLORS = {
   correct: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30",
@@ -69,13 +95,43 @@ const ReciteDialog = ({ open, onOpenChange, ayah, surahName, surahNumber }) => {
   const mediaRef = useRef(null);
   const chunksRef = useRef([]);
   const streamRef = useRef(null);
+  const mountedRef = useRef(true);
+  const attemptGenRef = useRef(0);
+  const attemptRef = useRef(null);
 
-  const cleanup = () => {
+  const stopStreamTracks = () => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     }
   };
+
+  const cleanup = () => {
+    attemptGenRef.current += 1;
+    attemptRef.current = null;
+    if (mediaRef.current) {
+      mediaRef.current.ondataavailable = null;
+      mediaRef.current.onstop = null;
+      if (mediaRef.current.state !== "inactive") {
+        try {
+          mediaRef.current.stop();
+        } catch {
+          /* ignore */
+        }
+      }
+      mediaRef.current = null;
+    }
+    chunksRef.current = [];
+    stopStreamTracks();
+  };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      cleanup();
+    };
+  }, []);
 
   useEffect(() => {
     if (!open) {
@@ -83,35 +139,104 @@ const ReciteDialog = ({ open, onOpenChange, ayah, surahName, surahNumber }) => {
       setPhase("idle");
       setResult(null);
     }
-    return cleanup;
   }, [open]);
 
   const startRecording = async () => {
+    if (phase !== "idle") return;
+    const gen = ++attemptGenRef.current;
+    const attempt = {
+      eventId: makeEventId(),
+      identity: resolveAyahIdentity(ayah, surahNumber, surahName),
+      completed: false,
+      stopping: false,
+    };
+    attemptRef.current = attempt;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!mountedRef.current || gen !== attemptGenRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
       streamRef.current = stream;
       chunksRef.current = [];
       const mr = new MediaRecorder(stream);
-      mr.ondataavailable = (e) => e.data.size > 0 && chunksRef.current.push(e.data);
-      mr.onstop = () => handleSubmit(new Blob(chunksRef.current, { type: "audio/webm" }));
+      if (AUTOMATED_ASSESSMENT_ENABLED) {
+        mr.ondataavailable = (e) => e.data.size > 0 && chunksRef.current.push(e.data);
+        mr.onstop = () => {
+          const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+          chunksRef.current = [];
+          stopStreamTracks();
+          handleSubmit(blob, gen, attempt);
+        };
+      } else {
+        mr.ondataavailable = null;
+        mr.onstop = () => {
+          chunksRef.current = [];
+          stopStreamTracks();
+          handleSubmit(null, gen, attempt);
+        };
+      }
       mediaRef.current = mr;
       mr.start();
       setPhase("recording");
     } catch (e) {
+      if (gen === attemptGenRef.current) {
+        attemptRef.current = null;
+        stopStreamTracks();
+      }
       toast.error("Microphone access denied. Please allow mic permissions.");
     }
   };
 
   const stopRecording = () => {
-    if (mediaRef.current && mediaRef.current.state !== "inactive") {
-      mediaRef.current.stop();
-    }
-    cleanup();
+    if (phase !== "recording") return;
+    const mr = mediaRef.current;
+    if (!mr || mr.state === "inactive" || attemptRef.current?.stopping) return;
+    attemptRef.current.stopping = true;
     setPhase("submitting");
+    mr.stop();
   };
 
-  const handleSubmit = async (blob) => {
+  const handleSubmit = async (blob, gen, attempt) => {
+    if (!attempt || attempt.completed || gen !== attemptGenRef.current) return;
+    attempt.completed = true;
+    mediaRef.current = null;
+    chunksRef.current = [];
+    stopStreamTracks();
+
     if (!AUTOMATED_ASSESSMENT_ENABLED) {
+      let summary;
+      if (!attempt.identity) {
+        summary =
+          "Practice finished, but progress could not be logged because verse details were unavailable. Audio was not uploaded or stored, and automated pronunciation and Tajweed grading is currently unavailable.";
+      } else {
+        try {
+          const res = await logPracticeActivity({
+            user_id: getUserId(),
+            kind: "recite_practice",
+            surah_number: attempt.identity.surahNumber,
+            surah_name: attempt.identity.surahName,
+            ayah_number: attempt.identity.ayahNumber,
+            ayah_keys: [attempt.identity.key],
+            client_event_id: attempt.eventId,
+          });
+          if (!mountedRef.current || gen !== attemptGenRef.current) return;
+          if (res?.duplicate === true) {
+            summary =
+              "Practice was already recorded for this attempt. Audio was not uploaded or stored, and automated pronunciation and Tajweed grading is currently unavailable.";
+          } else if (typeof res?.xp_earned === "number" && res.xp_earned > 0) {
+            summary = `Practice saved (+${res.xp_earned} XP). Audio was not uploaded or stored, and automated pronunciation and Tajweed grading is currently unavailable.`;
+          } else {
+            summary =
+              "Practice saved. Audio was not uploaded or stored, and automated pronunciation and Tajweed grading is currently unavailable.";
+          }
+        } catch {
+          if (!mountedRef.current || gen !== attemptGenRef.current) return;
+          summary =
+            "Practice finished, but progress could not be saved right now. Audio was not uploaded or stored, and automated pronunciation and Tajweed grading is currently unavailable.";
+        }
+      }
+      if (!mountedRef.current || gen !== attemptGenRef.current) return;
       setResult({
         available: false,
         score_verified: false,
@@ -120,8 +245,7 @@ const ReciteDialog = ({ open, onOpenChange, ayah, surahName, surahNumber }) => {
         transcription: "",
         word_feedback: [],
         tajweed_notes: [],
-        summary:
-          "Practice recording completed. Automated pronunciation and Tajweed grading is currently unavailable.",
+        summary,
       });
       setPhase("result");
       return;
@@ -136,9 +260,11 @@ const ReciteDialog = ({ open, onOpenChange, ayah, surahName, surahNumber }) => {
       fd.append("ayah_number", String(ayah.numberInSurah));
       fd.append("user_id", getUserId());
       const data = await submitRecitation(fd);
+      if (!mountedRef.current || gen !== attemptGenRef.current) return;
       setResult(data);
       setPhase("result");
     } catch (e) {
+      if (!mountedRef.current || gen !== attemptGenRef.current) return;
       const msg = e?.response?.data?.detail || "Automated assessment is currently unavailable.";
       toast.error(typeof msg === "string" ? msg : "Automated assessment is currently unavailable.");
       setPhase("idle");
@@ -196,7 +322,7 @@ const ReciteDialog = ({ open, onOpenChange, ayah, surahName, surahNumber }) => {
         {phase === "submitting" && (
           <div className="flex flex-col items-center gap-3 py-8">
             <Loader2 className="h-8 w-8 animate-spin text-primary" />
-            <p className="text-sm text-muted-foreground">Finishing practice recording…</p>
+            <p className="text-sm text-muted-foreground">Saving practice…</p>
           </div>
         )}
 

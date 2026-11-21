@@ -7,6 +7,7 @@ import {
   getVerifiedScore,
   getVerifiedSurahScore,
 } from "./assessment.js";
+import { ayahKey, practiceDetails, playbackStart } from "./practiceSession.js";
 
 test("automated assessment is disabled for ALIF-001A", () => {
   assert.equal(AUTOMATED_ASSESSMENT_ENABLED, false);
@@ -96,3 +97,87 @@ test("missing, null, and invalid values fail closed safely", () => {
     assert.equal(getVerifiedSurahScore(invalid, 1), null);
   }
 });
+
+test("ayahKey formats exact surah:ayah identity and never emits bare ayah numbers", () => {
+  assert.equal(ayahKey({ surahNumber: 112, numberInSurah: 1 }, 1), "112:1");
+  assert.equal(ayahKey({ numberInSurah: 4 }, 112), "112:4");
+  assert.equal(ayahKey({ surahNumber: 113, numberInSurah: 1 }, 112), "113:1");
+  assert.match(ayahKey({ surahNumber: 2, numberInSurah: 255 }, 2), /^\d+:\d+$/);
+});
+
+test("practiceDetails preserves cross-surah Mushaf page ayah_keys and scope metadata", () => {
+  const page604Ayahs = [
+    { surahNumber: 112, numberInSurah: 4, page: 604 },
+    { surahNumber: 113, numberInSurah: 1, page: 604 },
+    { surahNumber: 114, numberInSurah: 1, page: 604 },
+  ];
+  const pageDetails = practiceDetails(page604Ayahs, 112, "page", false);
+  assert.deepEqual(pageDetails, {
+    scope: "page",
+    assisted: false,
+    ayah_keys: ["112:4", "113:1", "114:1"],
+    page: 604,
+  });
+
+  const surahDetails = practiceDetails(
+    [{ numberInSurah: 1 }, { numberInSurah: 2 }],
+    112,
+    "surah",
+    true
+  );
+  assert.deepEqual(surahDetails, {
+    scope: "surah",
+    assisted: true,
+    ayah_keys: ["112:1", "112:2"],
+    page: undefined,
+  });
+});
+
+test("playbackStart selects preceding basmala only for matching surah", () => {
+  const items = [
+    { surahNumber: 112, numberInSurah: 4, isBasmala: false },
+    { surahNumber: 113, numberInSurah: 0, isBasmala: true },
+    { surahNumber: 113, numberInSurah: 1, isBasmala: false },
+    { surahNumber: 113, numberInSurah: 2, isBasmala: false },
+  ];
+  assert.equal(playbackStart(items, 113, 1), 1);
+  assert.equal(playbackStart(items, 113, 2), 3);
+  assert.equal(playbackStart(items, 112, 4), 0);
+  assert.equal(playbackStart(items, 114, 1), 0);
+});
+
+test("Dashboard, Homework, and GroupRoom payload shapes fail closed", () => {
+  const dashboardProgress = {
+    score_verified: true,
+    average_score: 94,
+    surah_best: { 112: 97, "113": 91 },
+    recent: [
+      { kind: "recite_practice", surah_number: 112, ayah_keys: ["112:1"], xp: 10, score: null, score_verified: false },
+      { kind: "recite_practice", surah_number: 112, ayah_keys: ["112:2"], xp: 10, score: 96, score_verified: true },
+    ],
+  };
+  assert.equal(getVerifiedScore(dashboardProgress, "average_score"), null);
+  assert.equal(getVerifiedSurahScore(dashboardProgress, 112), null);
+  assert.equal(getVerifiedSurahScore(dashboardProgress, 113), null);
+  assert.equal(getVerifiedScore(dashboardProgress.recent[0], "score"), null);
+  assert.equal(getVerifiedScore(dashboardProgress.recent[1], "score"), null);
+
+  const homeworkLegacy = { best_score: 85, legacy_best_score: 85 };
+  const homeworkForged = { best_score: 92, score_verified: true, available: true };
+  assert.equal(getVerifiedScore(homeworkLegacy, "best_score"), null);
+  assert.equal(getVerifiedScore(homeworkForged, "best_score"), null);
+
+  const groupRoom = {
+    last_turn: { name: "Ali", ayah: 1, score: 95, verdict: "Excellent", score_verified: true },
+    results: [
+      { name: "Ali", ayah: 1, score: 95, score_verified: true },
+      { name: "Fatima", ayah: 2, score: 88 },
+    ],
+  };
+  assert.equal(getVerifiedScore(groupRoom.last_turn), null);
+  assert.equal(isVerifiedAssessment(groupRoom.last_turn), false);
+  for (const entry of groupRoom.results) {
+    assert.equal(getVerifiedScore(entry), null);
+  }
+});
+
