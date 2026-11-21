@@ -1,0 +1,119 @@
+{
+  "project_name": "Tajweed Learn - Standard Mushaf Reader",
+  "theme_preference": "dark",
+  "typography": {
+    "primary_ui_font": "Inter, sans-serif",
+    "arabic_font": "'KFGQPC Uthman Taha Naskh', 'Amiri', 'Scheherazade New', serif",
+    "hierarchy": {
+      "h1": "text-2xl sm:text-3xl font-bold tracking-tight",
+      "h2": "text-xl sm:text-2xl font-semibold tracking-tight",
+      "body": "text-sm sm:text-base leading-relaxed",
+      "arabic_text": "text-2xl sm:text-3xl md:text-4xl leading-[2.5] text-justify dir-rtl font-arabic",
+      "labels": "text-xs uppercase tracking-[0.2em] font-medium"
+    }
+  },
+  "colors": {
+    "background": {
+      "base": "#050505",
+      "surface": "#121212",
+      "glass": "rgba(10, 10, 10, 0.85)"
+    },
+    "text": {
+      "primary": "#F8FAFC",
+      "secondary": "#A1A1AA",
+      "muted": "#52525B"
+    },
+    "accent": {
+      "primary": "#10B981",
+      "primary_hover": "#059669",
+      "glow": "rgba(16, 185, 129, 0.4)",
+      "medallion": "#D4AF37",
+      "medallion_faint": "rgba(212, 175, 55, 0.3)"
+    },
+    "borders": {
+      "subtle": "rgba(255, 255, 255, 0.1)",
+      "focus": "#10B981"
+    }
+  },
+  "visual_enhancers": {
+    "glassmorphism": "backdrop-blur-2xl bg-[#0a0a0a]/90 border-white/10",
+    "shadows": {
+      "fab": "shadow-[0_0_24px_rgba(16,185,129,0.4)]",
+      "dropdown": "shadow-[0_8px_32px_rgba(0,0,0,0.5)]"
+    },
+    "ayah_medallion": "inline-flex items-center justify-center w-8 h-8 rounded-full border border-[#D4AF37] text-[#D4AF37] text-xs mx-1 font-sans font-medium relative top-1",
+    "surah_banner": "flex items-center justify-center w-full h-14 bg-[url('/ornate-pattern.svg')] bg-[#121212] border-y-2 border-[#D4AF37]/50 text-[#D4AF37] my-4 rounded-sm relative overflow-hidden font-arabic text-xl shadow-inner",
+    "hidden_verse_lines": "repeating-linear-gradient(transparent, transparent 44px, rgba(255,255,255,0.05) 45px)"
+  },
+  "layouts": {
+    "app_container": "h-[100dvh] w-full bg-[#050505] text-slate-50 flex flex-col overflow-hidden select-none dir-rtl",
+    "mushaf_page": "w-full h-full flex flex-col p-4 overflow-y-auto overflow-x-hidden no-scrollbar pb-32 transition-colors duration-300",
+    "top_nav_overlay": "fixed top-0 left-0 right-0 z-50 flex items-center justify-between p-4 backdrop-blur-2xl bg-[#0a0a0a]/90 border-b border-white/10 shadow-lg",
+    "bottom_audio_bar": "fixed bottom-0 left-0 right-0 z-50 p-4 backdrop-blur-2xl bg-[#0a0a0a]/90 border-t border-white/10 flex flex-col gap-4 pb-safe",
+    "info_pill": "flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/5 border border-white/10 text-xs sm:text-sm font-medium tracking-wide shadow-sm",
+    "fab_container": "fixed bottom-24 right-6 z-40"
+  },
+  "motion": {
+    "page_turn": "framer-motion drag='x' with constraints, triggering onDragEnd to change page index. Transition: type='spring', stiffness=300, damping=30",
+    "overlay_toggle": "Animate top nav (y: '-100%' -> '0%') and bottom bar (y: '100%' -> '0%') with opacity 0 -> 1. duration: 0.3s ease-out",
+    "context_menu": "Scale up from transform origin at the tap location. Initial scale: 0.9, opacity: 0 -> scale: 1, opacity: 1, type: spring"
+  },
+  "components": {
+    "PageContainer": {
+      "path": "/app/frontend/src/components/mushaf/PageContainer.js",
+      "description": "Framer motion container managing the 604-page horizontal swipe logic. Tracks current page state."
+    },
+    "MushafPage": {
+      "path": "/app/frontend/src/components/mushaf/MushafPage.js",
+      "description": "Renders verses for a specific page. Maps over verses to render them continuously. Handles 'hidden verses' mode by toggling text opacity to 0 while keeping medallions visible."
+    },
+    "SurahBanner": {
+      "path": "/app/frontend/src/components/mushaf/SurahBanner.js",
+      "description": "Ornate banner displayed at the beginning of a Surah on the page."
+    },
+    "AyahText": {
+      "path": "/app/frontend/src/components/mushaf/AyahText.js",
+      "description": "Component for individual Ayah text. Renders the Uthmani text followed by the AyahMedallion. Detects double-tap to trigger ContextMenu."
+    },
+    "TopNavigationBar": {
+      "path": "/app/frontend/src/components/mushaf/TopNavigationBar.js",
+      "description": "Glassmorphic top overlay toggled via single-tap. Contains hamburger menu, settings gear, and the Surah/Page/Juz info pill."
+    },
+    "BottomAudioControls": {
+      "path": "/app/frontend/src/components/mushaf/BottomAudioControls.js",
+      "description": "Streamlined audio player overlay toggled via single-tap. Contains global playback controls, Recite Along, and Memorize mode."
+    },
+    "PlayFAB": {
+      "path": "/app/frontend/src/components/mushaf/PlayFAB.js",
+      "description": "Large glowing green play button floating at the bottom right. Toggles global audio."
+    },
+    "AyahContextMenu": {
+      "path": "/app/frontend/src/components/mushaf/AyahContextMenu.js",
+      "description": "Minimal, compact context menu triggered by double-tap on an Ayah. Absolutely positioned near the touch coordinates."
+    }
+  },
+  "instructions_to_main_agent": [
+    "Ensure your file paths correspond to .js files (not .tsx) as requested by the environment.",
+    "Do NOT use complete transparent backgrounds for overlays like TopNav, BottomBar, or ContextMenus. Use solid dark backgrounds with blur (bg-[#0a0a0a]/90 backdrop-blur-2xl).",
+    "Render the Mushaf reading surface strictly to mimic real Madani pages. Use text-justify with inline ayahs. Shadcn UI cards are inappropriate for this specific reading view.",
+    "Use framer-motion extensively for swipe gestures across the 604 pages, as well as smoothly animating the entrance/exit of the single-tap controls overlay.",
+    "For 'Hidden Verses' mode, apply a CSS class or inline style that forces text color to transparent (text-transparent) while maintaining layout, but ensures the Ayah Medallions remain visible.",
+    "Double-tap interactions must use a custom hook or React event listener on the Ayah elements to calculate X/Y coordinates for spawning the compact ContextMenu.",
+    "Include 'data-testid' on all interactive elements (e.g., 'data-testid=\"next-page-btn\"', 'data-testid=\"play-fab\"').",
+    "Global playback state should be decoupled from the page so audio continues playing seamlessly when turning pages."
+  ],
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "You tend to converge toward generic, 'on distribution' outputs. Avoid this: make creative, distinctive frontends that surprise and delight.",
+    "Dark colors look good when used independently without gradients. DO NOT use dark colors as gradients.",
+    "Don't make generic centered layouts, simplistic gradients, and uniform styling.",
+    "Create depth through layered design elements with z-index hierarchy.",
+    "Use glass-morphism effects with backdrop filters (12-24px blur).",
+    "You MUST NOT apply universal transition (e.g., transition: all). This breaks transforms. Always target specific properties.",
+    "You MUST NOT center align the app container, i.e. do not add '.App { text-align: center; }' in the css file.",
+    "Always use modern button styles like pill-shaped, or sharp buttons with interaction animations & color relevant to the app style.",
+    "NEVER use AI assistant Emoji characters like 🤖🧠💭 for icons.",
+    "Every interaction needs micro-animations - hover states, transitions, parallax effects, and entrance animations. Static = dead.",
+    "Use sonner for toasts. Sonner component is located in /app/frontend/src/components/ui/sonner.js",
+    "All interactive elements MUST include a data-testid attribute to facilitate robust automated testing."
+  ]
+}

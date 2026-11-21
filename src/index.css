@@ -1,0 +1,95 @@
+@import url('https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=Cormorant+Garamond:wght@400;600;700&family=Manrope:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+    margin: 0;
+    font-family: 'Manrope', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+@layer base {
+    :root {
+        --background: 40 33% 98%;
+        --foreground: 20 12% 10%;
+        --card: 0 0% 100%;
+        --card-foreground: 20 12% 10%;
+        --popover: 0 0% 100%;
+        --popover-foreground: 20 12% 10%;
+        --primary: 142 64% 24%;
+        --primary-foreground: 40 33% 98%;
+        --secondary: 40 20% 94%;
+        --secondary-foreground: 20 12% 12%;
+        --muted: 40 18% 93%;
+        --muted-foreground: 30 6% 38%;
+        --accent: 142 40% 92%;
+        --accent-foreground: 142 64% 20%;
+        --destructive: 0 72% 45%;
+        --destructive-foreground: 0 0% 98%;
+        --border: 30 12% 88%;
+        --input: 30 12% 88%;
+        --ring: 142 64% 24%;
+        --radius: 0.75rem;
+    }
+    .dark {
+        --background: 155 20% 5%;
+        --foreground: 210 40% 98%;
+        --card: 150 17% 9%;
+        --card-foreground: 210 40% 98%;
+        --popover: 150 17% 9%;
+        --popover-foreground: 210 40% 98%;
+        --primary: 160 84% 39%;
+        --primary-foreground: 155 25% 6%;
+        --secondary: 150 12% 14%;
+        --secondary-foreground: 210 40% 98%;
+        --muted: 150 12% 14%;
+        --muted-foreground: 215 18% 62%;
+        --accent: 160 40% 16%;
+        --accent-foreground: 160 84% 70%;
+        --destructive: 0 62% 42%;
+        --destructive-foreground: 0 0% 98%;
+        --border: 150 12% 18%;
+        --input: 150 12% 18%;
+        --ring: 160 84% 39%;
+    }
+}
+
+@layer base {
+    * {
+        @apply border-border;
+    }
+    body {
+        @apply bg-background text-foreground;
+    }
+}
+
+@layer utilities {
+    .font-arabic {
+        font-family: 'Amiri', serif;
+    }
+    .font-heading {
+        font-family: 'Cormorant Garamond', serif;
+    }
+    .font-body {
+        font-family: 'Manrope', sans-serif;
+    }
+    .glass {
+        backdrop-filter: blur(18px) saturate(1.4);
+        -webkit-backdrop-filter: blur(18px) saturate(1.4);
+    }
+    .parchment {
+        background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+    }
+}
+
+@keyframes recordpulse {
+    0% { box-shadow: 0 0 0 0 hsl(var(--primary) / 0.5); }
+    70% { box-shadow: 0 0 0 16px hsl(var(--primary) / 0); }
+    100% { box-shadow: 0 0 0 0 hsl(var(--primary) / 0); }
+}
+.animate-recordpulse {
+    animation: recordpulse 1.4s infinite;
+}
