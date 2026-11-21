@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import multer from 'multer';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'node:url';
+import { commitPracticeActivity } from './src/lib/groupTurnGuard.mjs';
 
 dotenv.config();
 
@@ -13,7 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const HOST = '0.0.0.0';
 
 const upload = multer({
@@ -26,7 +27,9 @@ app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
 // ---------------- In-memory + File Persistence ----------------
-const dataDir = path.resolve(__dirname, 'data');
+const dataDir = process.env.ALIF_DATA_DIR
+  ? path.resolve(process.env.ALIF_DATA_DIR)
+  : path.resolve(__dirname, 'data');
 if (!fs.existsSync(dataDir)) {
   try { fs.mkdirSync(dataDir, { recursive: true }); } catch { /* ignore */ }
 }
@@ -43,12 +46,14 @@ const loadJson = <T>(filename: string, fallback: T): T => {
   return fallback;
 };
 
-const saveJson = (filename: string, data: any) => {
+const saveJson = (filename: string, data: any): boolean => {
   const filePath = path.join(dataDir, filename);
   try {
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+    return true;
   } catch (err) {
     console.warn(`Error saving ${filename}:`, err);
+    return false;
   }
 };
 
@@ -118,6 +123,7 @@ interface SubmissionDoc {
 }
 
 interface RoomDoc {
+  instance_id: string;
   code: string;
   host_device: string;
   surah_number: number;
@@ -139,6 +145,8 @@ const assignments: AssignmentDoc[] = loadJson('assignments.json', []);
 const submissions: SubmissionDoc[] = loadJson('submissions.json', []);
 const resetTokens: Array<{ token: string; email: string; created_at: string; used: boolean }> = [];
 const rooms: Map<string, RoomDoc> = new Map();
+const creditedGroupTurns: Set<string> = new Set();
+const surahAyahCounts: Map<number, number> = new Map();
 
 // ---------------- Helpers & Crypto ----------------
 const passwordHash = (password: string, salt = crypto.randomBytes(16).toString('hex')) => ({
@@ -394,6 +402,13 @@ apiRouter.get('/', (_req, res) => {
 apiRouter.get('/surahs', async (_req, res) => {
   try {
     const data = await fetchWithCache(`${QURAN_API}/surah`);
+    if (Array.isArray(data)) {
+      for (const s of data) {
+        if (Number.isInteger(s?.number) && Number.isInteger(s?.numberOfAyahs) && s.numberOfAyahs > 0) {
+          surahAyahCounts.set(s.number, s.numberOfAyahs);
+        }
+      }
+    }
     res.json(data);
   } catch (err: any) {
     res.status(502).json({ detail: `Quran API error: ${err.message}` });
@@ -451,6 +466,9 @@ apiRouter.get('/surah/:number', async (req, res) => {
       revelationType: arabic.revelationType,
       numberOfAyahs: arabic.numberOfAyahs,
     };
+    if (Number.isInteger(number) && Number.isInteger(arabic.numberOfAyahs) && arabic.numberOfAyahs > 0) {
+      surahAyahCounts.set(number, arabic.numberOfAyahs);
+    }
 
     const ayahs = (arabic.ayahs || []).map((a: any, i: number) => {
       let text = a.text;
@@ -736,37 +754,18 @@ apiRouter.get('/learner/me', (req, res) => {
 // Progress Tracking (never accepts client-supplied scores or score_verified flags)
 apiRouter.post('/progress/activity', (req, res) => {
   const activity = req.body || {};
-  const userId = activity.user_id || 'anon';
-  const clientEventId =
-    typeof activity.client_event_id === 'string' && activity.client_event_id.trim()
-      ? activity.client_event_id.trim()
-      : undefined;
-
-  // Idempotency guard for retries of the exact same session event (never time-windowed)
-  if (clientEventId && practiceLogs.some((l) => l.user_id === userId && l.client_event_id === clientEventId)) {
-    return res.json({ xp_earned: 0, duplicate: true });
-  }
-
-  const xp = activity.kind === 'memorize' ? 25 : activity.kind === 'recite_along' ? 15 : 10;
-  const log: PracticeLog = {
-    id: crypto.randomUUID(),
-    user_id: userId,
-    kind: activity.kind,
-    surah_number: activity.surah_number,
-    surah_name: activity.surah_name,
-    ayah_number: activity.ayah_number,
-    ayah_keys: activity.ayah_keys,
-    score: null,
-    verdict: undefined,
-    score_verified: false,
-    ...(clientEventId ? { client_event_id: clientEventId } : {}),
-    xp,
-    created_at: new Date().toISOString(),
-  };
-  practiceLogs.unshift(log);
-  saveJson('practice-logs.json', practiceLogs);
-
-  res.json({ xp_earned: xp });
+  const surahNum = typeof activity.surah_number === 'number' ? activity.surah_number : undefined;
+  const result = commitPracticeActivity({
+    activity,
+    practiceLogs,
+    rooms,
+    creditedGroupTurns,
+    maxAyahCount: surahNum !== undefined ? surahAyahCounts.get(surahNum) : undefined,
+    persistLogs: (logs) => saveJson('practice-logs.json', logs),
+    createId: () => crypto.randomUUID(),
+    nowIso: () => new Date().toISOString(),
+  });
+  return res.status(result.status).json(result.body);
 });
 
 apiRouter.get('/progress', (req, res) => {
@@ -1120,9 +1119,13 @@ apiRouter.get('/classes/assignments', (req, res) => {
 apiRouter.post('/rooms', (req, res) => {
   const { name, surah_number, surah_name } = req.body;
   const device_id = crypto.randomUUID();
-  const code = Math.random().toString(36).substring(2, 7).toUpperCase();
+  let code = Math.random().toString(36).substring(2, 7).toUpperCase();
+  while (rooms.has(code)) {
+    code = Math.random().toString(36).substring(2, 7).toUpperCase();
+  }
 
   const room: RoomDoc = {
+    instance_id: crypto.randomUUID(),
     code,
     host_device: device_id,
     surah_number: Number(surah_number),
@@ -1205,21 +1208,23 @@ app.use('/api', apiRouter);
 const isProduction = process.env.NODE_ENV === 'production';
 
 async function startServer() {
-  if (!isProduction) {
-    // Development mode: Mount Vite dev server middlewares
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    // Production mode: Serve built assets from dist
-    const distPath = path.resolve(__dirname, 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+  if (process.env.ALIF_API_ONLY !== '1') {
+    if (!isProduction) {
+      // Development mode: Mount Vite dev server middlewares
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } else {
+      // Production mode: Serve built assets from dist
+      const distPath = path.resolve(__dirname, 'dist');
+      app.use(express.static(distPath));
+      app.get('*', (_req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
   }
 
   app.listen(PORT, HOST, () => {

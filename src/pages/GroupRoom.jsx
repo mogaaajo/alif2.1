@@ -295,6 +295,10 @@ const GroupRoom = () => {
           const res = await logPracticeActivity({
             user_id: getUserId(),
             kind: "group_recitation",
+            room_code: attempt.roomCode,
+            device_id: attempt.deviceId,
+            ayah_index: attempt.ayahIndex,
+            turn_index: attempt.turnIndex,
             surah_number: attempt.identity.surahNumber,
             surah_name: attempt.identity.surahName,
             ayah_number: attempt.identity.ayahNumber,
@@ -304,15 +308,40 @@ const GroupRoom = () => {
           if (!mountedRef.current || gen !== attemptGenRef.current || !isAttemptTurnStillValid(attempt)) return;
           if (res?.duplicate === true) {
             summary =
-              "Turn practice was already recorded for this attempt. Audio was not uploaded or stored, and automated scoring is currently unavailable.";
+              "Turn practice was already recorded for this turn. Audio was not uploaded or stored, and automated scoring is currently unavailable.";
           } else if (typeof res?.xp_earned === "number" && res.xp_earned > 0) {
             summary = `Turn practice saved (+${res.xp_earned} XP). Audio was not uploaded or stored, and automated scoring is currently unavailable.`;
           } else {
             summary =
               "Turn practice saved. Audio was not uploaded or stored, and automated scoring is currently unavailable.";
           }
-        } catch {
-          if (!mountedRef.current || gen !== attemptGenRef.current || !isAttemptTurnStillValid(attempt)) return;
+        } catch (err) {
+          if (!mountedRef.current || gen !== attemptGenRef.current) return;
+          const status = err?.response?.status;
+          if (status === 400 || status === 403 || status === 404 || status === 409) {
+            const rejectedMessage =
+              status === 403
+                ? "Practice credit could not be saved because this turn no longer belongs to you."
+                : status === 404
+                  ? "Practice credit could not be saved because this group room is no longer available."
+                  : status === 409
+                    ? "Practice credit could not be saved because this turn or session is no longer current."
+                    : "Practice credit could not be saved because the turn details were invalid.";
+            toast.error(rejectedMessage);
+            setMyResult(null);
+            setTurnPhase("idle");
+            getRoom(code)
+              .then((latestRoom) => {
+                if (mountedRef.current) setRoom(latestRoom);
+              })
+              .catch(() => {});
+            return;
+          }
+          if (!isAttemptTurnStillValid(attempt)) {
+            setMyResult(null);
+            setTurnPhase("idle");
+            return;
+          }
           summary =
             "Turn practice finished, but progress could not be saved right now. Audio was not uploaded or stored, and automated scoring is currently unavailable.";
         }
