@@ -9,6 +9,11 @@ import {
   validateGroupPracticeTurn,
   commitPracticeActivity,
   makeGroupTurnCreditKey,
+  SURAH_AYAH_COUNTS,
+  getSurahAyahCount,
+  parseValidSurahNumber,
+  resolveRoomTotalAyahs,
+  advanceGroupRoomTurn,
 } from "./groupTurnGuard.mjs";
 
 const makeRoom = (overrides = {}) => ({
@@ -605,6 +610,458 @@ test("Isolated real HTTP endpoint test — POST /api/progress/activity enforces 
     assert.equal(progB2.total_xp, 10);
     assert.equal(progA2.score_verified, false);
     assert.equal(progB2.score_verified, false);
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => {
+      child.once("exit", resolve);
+      setTimeout(resolve, 1500);
+    });
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+// ---- ALIF-001A Correction 03 Tests: Surah Boundary Integrity & Completion ----
+
+test("Correction 03 Test A — authoritative 114-surah verse counts are complete, sum to 6236, and reject invalid surahs", () => {
+  assert.equal(SURAH_AYAH_COUNTS.length, 115);
+  assert.equal(SURAH_AYAH_COUNTS[0], 0);
+
+  let total = 0;
+  for (let s = 1; s <= 114; s += 1) {
+    const count = getSurahAyahCount(s);
+    assert.ok(Number.isInteger(count) && count >= 1, `Surah ${s} must have a positive integer ayah count`);
+    total += count;
+  }
+  assert.equal(total, 6236);
+
+  // Spot checks of canonical Hafs/Madani counts
+  assert.equal(getSurahAyahCount(1), 7);    // Al-Fatiha
+  assert.equal(getSurahAyahCount(2), 286);  // Al-Baqarah
+  assert.equal(getSurahAyahCount(78), 40);  // An-Naba
+  assert.equal(getSurahAyahCount(108), 3);  // Al-Kawthar
+  assert.equal(getSurahAyahCount(112), 4);  // Al-Ikhlas
+  assert.equal(getSurahAyahCount(113), 5);  // Al-Falaq
+  assert.equal(getSurahAyahCount(114), 6);  // An-Nas
+
+  for (const invalid of [0, -1, 115, 1.5, "1", "", null, undefined, NaN, Infinity]) {
+    assert.equal(getSurahAyahCount(invalid), null, `getSurahAyahCount should reject ${String(invalid)}`);
+  }
+
+  assert.equal(parseValidSurahNumber(1), 1);
+  assert.equal(parseValidSurahNumber("1"), 1);
+  assert.equal(parseValidSurahNumber("114"), 114);
+  for (const invalid of [0, -5, 115, 1.5, "1.5", "", "abc", "0", "115", null, undefined, true]) {
+    assert.equal(parseValidSurahNumber(invalid), null, `parseValidSurahNumber should reject ${String(invalid)}`);
+  }
+});
+
+test("Correction 03 Tests B & C — Al-Fatiha finishes cleanly after ayah 7, preserves final-ayah XP and idempotent retry, and rejects post-completion advance/XP", () => {
+  const room = makeRoom({
+    surah_number: 1,
+    surah_name: "Al-Fatiha",
+    total_ayahs: 7,
+  });
+  const { practiceLogs, commit } = makeHarness(room);
+
+  // Advance through Ayahs 1..6 (indices 0..5 -> lands on index 6 = Ayah 7)
+  for (let i = 0; i < 6; i += 1) {
+    const owner = room.participants[room.turn_index % room.participants.length].device_id;
+    const adv = advanceGroupRoomTurn({ room, deviceId: owner });
+    assert.equal(adv.ok, true);
+    assert.equal(adv.finished, false);
+    assert.equal(room.status, "active");
+    assert.equal(room.ayah_index, i + 1);
+    assert.equal(room.turn_index, i + 1);
+  }
+
+  // Ayah 7 (index 6, turn 6 -> owned by dev-a) earns legitimate XP
+  const finalAyahPayload = makeGroupPayload({
+    surah_number: 1,
+    surah_name: "Al-Fatiha",
+    device_id: "dev-a",
+    turn_index: 6,
+    ayah_index: 6,
+    ayah_number: 7,
+    ayah_keys: ["1:7"],
+    client_event_id: "ev-fatiha-7",
+  });
+  const finalXp = commit(finalAyahPayload);
+  assert.equal(finalXp.ok, true);
+  assert.equal(finalXp.status, 200);
+  assert.deepEqual(finalXp.body, { xp_earned: 10 });
+  assert.equal(practiceLogs.length, 1);
+
+  // Advancing after Ayah 7 completes the session cleanly without incrementing past index 6
+  const finishAdv = advanceGroupRoomTurn({ room, deviceId: "dev-a" });
+  assert.equal(finishAdv.ok, true);
+  assert.equal(finishAdv.finished, true);
+  assert.equal(room.status, "finished");
+  assert.equal(room.ayah_index, 6);
+  assert.equal(room.turn_index, 6);
+
+  // Subsequent advance after completion is rejected cleanly
+  const extraAdv = advanceGroupRoomTurn({ room, deviceId: "dev-a" });
+  assert.equal(extraAdv.ok, false);
+  assert.equal(extraAdv.status, 400);
+  assert.equal(room.status, "finished");
+  assert.equal(room.ayah_index, 6);
+
+  // New practice activity on finished room (Ayah 7 new event or nonexistent Ayah 8) is rejected with 0 XP
+  const postCompleteNew = commit({
+    ...finalAyahPayload,
+    client_event_id: "ev-fatiha-7-late-new",
+  });
+  assert.equal(postCompleteNew.ok, false);
+  assert.equal(postCompleteNew.status, 409);
+  assert.equal(postCompleteNew.body.xp_earned, 0);
+
+  const ayah8Attempt = commit(
+    makeGroupPayload({
+      surah_number: 1,
+      surah_name: "Al-Fatiha",
+      device_id: "dev-b",
+      turn_index: 7,
+      ayah_index: 7,
+      ayah_number: 8,
+      ayah_keys: ["1:8"],
+      client_event_id: "ev-fatiha-8",
+    })
+  );
+  assert.equal(ayah8Attempt.ok, false);
+  assert.equal(ayah8Attempt.status, 409);
+  assert.equal(ayah8Attempt.body.xp_earned, 0);
+  assert.equal(practiceLogs.length, 1);
+
+  // Idempotent retry of already-committed final-ayah client_event_id after completion still returns duplicate 0 XP
+  const retryFinal = commit(finalAyahPayload);
+  assert.equal(retryFinal.ok, true);
+  assert.equal(retryFinal.status, 200);
+  assert.deepEqual(retryFinal.body, { xp_earned: 0, duplicate: true });
+  assert.equal(practiceLogs.length, 1);
+});
+
+test("Correction 03 Test D — cold-server boundary enforcement rejects nonexistent ayahs without cached Quran metadata", () => {
+  // Al-Fatiha forced to Ayah 8 (index 7) with NO total_ayahs and NO maxAyahCount
+  const coldFatiha = makeRoom({
+    surah_number: 1,
+    surah_name: "Al-Fatiha",
+    turn_index: 7,
+    ayah_index: 7,
+  });
+  const h1 = makeHarness(coldFatiha);
+  const res1 = h1.commit(
+    makeGroupPayload({
+      surah_number: 1,
+      surah_name: "Al-Fatiha",
+      device_id: "dev-b",
+      turn_index: 7,
+      ayah_index: 7,
+      ayah_number: 8,
+      ayah_keys: ["1:8"],
+      client_event_id: "ev-cold-fatiha-8",
+    })
+    // maxAyahCount intentionally omitted
+  );
+  assert.equal(res1.ok, false);
+  assert.equal(res1.status, 409);
+  assert.equal(res1.body.xp_earned, 0);
+  assert.equal(h1.practiceLogs.length, 0);
+
+  // Spoofed inflated total_ayahs on Surah 112 (Al-Ikhlas has 4 ayahs) is capped by authoritative metadata
+  const spoofedIkhlas = makeRoom({
+    surah_number: 112,
+    surah_name: "Al-Ikhlas",
+    total_ayahs: 99,
+    turn_index: 4,
+    ayah_index: 4,
+  });
+  assert.equal(resolveRoomTotalAyahs(spoofedIkhlas), 4);
+  const h2 = makeHarness(spoofedIkhlas);
+  const res2 = h2.commit(
+    makeGroupPayload({
+      surah_number: 112,
+      surah_name: "Al-Ikhlas",
+      device_id: "dev-a",
+      turn_index: 4,
+      ayah_index: 4,
+      ayah_number: 5,
+      ayah_keys: ["112:5"],
+      client_event_id: "ev-cold-ikhlas-5",
+    })
+  );
+  assert.equal(res2.ok, false);
+  assert.equal(res2.status, 409);
+  assert.equal(res2.body.xp_earned, 0);
+  assert.equal(h2.practiceLogs.length, 0);
+});
+
+test("Correction 03 Test E — Al-Fatiha completes cleanly with 1, 2, and 3 participants", () => {
+  for (const participantCount of [1, 2, 3]) {
+    const participants = Array.from({ length: participantCount }, (_, idx) => ({
+      device_id: `dev-${idx + 1}`,
+      name: `User ${idx + 1}`,
+    }));
+    const room = makeRoom({
+      surah_number: 1,
+      surah_name: "Al-Fatiha",
+      total_ayahs: 7,
+      participants,
+      host_device: participants[0].device_id,
+    });
+
+    for (let step = 0; step < 7; step += 1) {
+      const expectedOwner = participants[step % participantCount].device_id;
+      const adv = advanceGroupRoomTurn({ room, deviceId: expectedOwner });
+      assert.equal(adv.ok, true);
+      if (step < 6) {
+        assert.equal(adv.finished, false);
+        assert.equal(room.status, "active");
+        assert.equal(room.ayah_index, step + 1);
+      } else {
+        assert.equal(adv.finished, true);
+        assert.equal(room.status, "finished");
+        assert.equal(room.ayah_index, 6);
+      }
+    }
+  }
+});
+
+test("Correction 03 Test F — other surahs (Al-Ikhlas 4, An-Naba 40, Al-Baqarah 286) enforce exact final-ayah boundaries", () => {
+  const cases = [
+    { surah: 112, name: "Al-Ikhlas", total: 4 },
+    { surah: 78, name: "An-Naba", total: 40 },
+    { surah: 2, name: "Al-Baqarah", total: 286 },
+  ];
+
+  for (const c of cases) {
+    const lastIdx = c.total - 1;
+    const room = makeRoom({
+      surah_number: c.surah,
+      surah_name: c.name,
+      total_ayahs: c.total,
+      ayah_index: lastIdx,
+      turn_index: lastIdx,
+    });
+    const owner = room.participants[room.turn_index % room.participants.length].device_id;
+    const { commit, practiceLogs } = makeHarness(room);
+
+    // Final valid ayah succeeds
+    const validLast = commit(
+      makeGroupPayload({
+        surah_number: c.surah,
+        surah_name: c.name,
+        device_id: owner,
+        turn_index: lastIdx,
+        ayah_index: lastIdx,
+        ayah_number: c.total,
+        ayah_keys: [`${c.surah}:${c.total}`],
+        client_event_id: `ev-${c.surah}-last`,
+      })
+    );
+    assert.equal(validLast.ok, true);
+    assert.deepEqual(validLast.body, { xp_earned: 10 });
+    assert.equal(practiceLogs.length, 1);
+
+    // Advance completes the room cleanly
+    const finished = advanceGroupRoomTurn({ room, deviceId: owner });
+    assert.equal(finished.ok, true);
+    assert.equal(finished.finished, true);
+    assert.equal(room.status, "finished");
+    assert.equal(room.ayah_index, lastIdx);
+
+    // Next nonexistent ayah rejected on cold server
+    const overRoom = makeRoom({
+      surah_number: c.surah,
+      surah_name: c.name,
+      ayah_index: c.total,
+      turn_index: c.total,
+    });
+    const overOwner = overRoom.participants[overRoom.turn_index % overRoom.participants.length].device_id;
+    const hOver = makeHarness(overRoom);
+    const overRes = hOver.commit(
+      makeGroupPayload({
+        surah_number: c.surah,
+        surah_name: c.name,
+        device_id: overOwner,
+        turn_index: c.total,
+        ayah_index: c.total,
+        ayah_number: c.total + 1,
+        ayah_keys: [`${c.surah}:${c.total + 1}`],
+        client_event_id: `ev-${c.surah}-over`,
+      })
+    );
+    assert.equal(overRes.ok, false);
+    assert.equal(overRes.status, 409);
+    assert.equal(overRes.body.xp_earned, 0);
+  }
+});
+
+test("Correction 03 Isolated real HTTP test — cold server validates surahs, completes Al-Fatiha & Al-Ikhlas cleanly, and blocks post-completion advance/XP", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "alif-surah-bounds-"));
+  const port = await getFreePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const tsxBin = path.resolve(process.cwd(), "node_modules", ".bin", "tsx");
+
+  const child = spawn(tsxBin, ["server.ts"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      ALIF_DATA_DIR: tempDir,
+      ALIF_API_ONLY: "1",
+    },
+    stdio: "pipe",
+  });
+
+  const postJson = async (endpoint, payload) => {
+    const res = await fetch(`${baseUrl}${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json();
+    return { status: res.status, body };
+  };
+
+  try {
+    await waitForServer(baseUrl);
+
+    // 1. POST /api/rooms rejects invalid surah_number values
+    for (const badSurah of [0, 115, -2, 1.5, "abc", "", null]) {
+      const badRes = await postJson("/api/rooms", {
+        name: "Host",
+        surah_number: badSurah,
+        surah_name: "Invalid",
+      });
+      assert.equal(badRes.status, 400, `Expected 400 for surah_number=${String(badSurah)}`);
+    }
+
+    // 2. Surah Al-Fatiha (7 ayahs) on cold server ignores client-supplied total_ayahs
+    const created = await postJson("/api/rooms", {
+      name: "Amina",
+      surah_number: 1,
+      surah_name: "Al-Fatiha",
+      total_ayahs: 99,
+    });
+    assert.equal(created.status, 200);
+    assert.equal(created.body.surah_number, 1);
+    assert.equal(created.body.total_ayahs, 7);
+    const code = created.body.code;
+    const devA = created.body.device_id;
+
+    const joined = await postJson(`/api/rooms/${code}/join`, { name: "Bilal" });
+    assert.equal(joined.status, 200);
+    const devB = joined.body.device_id;
+    const devs = [devA, devB];
+
+    const started = await postJson(`/api/rooms/${code}/start`, { device_id: devA });
+    assert.equal(started.status, 200);
+    assert.equal(started.body.status, "active");
+
+    // Advance ayahs 1..6 (indices 0..5 -> lands on ayah 7, index 6)
+    for (let i = 0; i < 6; i += 1) {
+      const adv = await postJson(`/api/rooms/${code}/advance`, { device_id: devs[i % 2] });
+      assert.equal(adv.status, 200);
+      assert.equal(adv.body.status, "active");
+      assert.equal(adv.body.ayah_index, i + 1);
+      assert.equal(adv.body.turn_index, i + 1);
+    }
+
+    // Final ayah (1:7) owned by devA (turn_index 6 % 2 === 0) earns legitimate +10 XP
+    const finalPayload = {
+      user_id: "fatiha-user-a",
+      kind: "group_recitation",
+      room_code: code,
+      device_id: devA,
+      turn_index: 6,
+      ayah_index: 6,
+      surah_number: 1,
+      surah_name: "Al-Fatiha",
+      ayah_number: 7,
+      ayah_keys: ["1:7"],
+      client_event_id: "http-fatiha-final-7",
+    };
+    const finalXp = await postJson("/api/progress/activity", finalPayload);
+    assert.equal(finalXp.status, 200);
+    assert.deepEqual(finalXp.body, { xp_earned: 10 });
+
+    // Advancing after ayah 7 transitions room to finished and keeps ayah_index clamped at 6
+    const finished = await postJson(`/api/rooms/${code}/advance`, { device_id: devA });
+    assert.equal(finished.status, 200);
+    assert.equal(finished.body.status, "finished");
+    assert.equal(finished.body.ayah_index, 6);
+    assert.equal(finished.body.total_ayahs, 7);
+
+    // GET /api/rooms/:code reflects finished state
+    const fetched = await (await fetch(`${baseUrl}/api/rooms/${code}`)).json();
+    assert.equal(fetched.status, "finished");
+    assert.equal(fetched.ayah_index, 6);
+
+    // Subsequent advance after completion is rejected cleanly
+    const extraAdv = await postJson(`/api/rooms/${code}/advance`, { device_id: devA });
+    assert.equal(extraAdv.status, 400);
+
+    // New practice attempt on finished room or nonexistent ayah 1:8 is rejected with 0 XP
+    const ayah8Res = await postJson("/api/progress/activity", {
+      user_id: "fatiha-user-b",
+      kind: "group_recitation",
+      room_code: code,
+      device_id: devB,
+      turn_index: 7,
+      ayah_index: 7,
+      surah_number: 1,
+      surah_name: "Al-Fatiha",
+      ayah_number: 8,
+      ayah_keys: ["1:8"],
+      client_event_id: "http-fatiha-8",
+    });
+    assert.equal(ayah8Res.status, 409);
+    assert.equal(ayah8Res.body.xp_earned, 0);
+
+    // Retrying already-committed 1:7 client_event_id after completion still succeeds idempotently with 0 XP
+    const retryFinal = await postJson("/api/progress/activity", finalPayload);
+    assert.equal(retryFinal.status, 200);
+    assert.deepEqual(retryFinal.body, { xp_earned: 0, duplicate: true });
+
+    const progA = await (await fetch(`${baseUrl}/api/progress?user_id=fatiha-user-a`)).json();
+    assert.equal(progA.total_xp, 10);
+    assert.equal(progA.score_verified, false);
+
+    // 3. Surah Al-Ikhlas (4 ayahs) completion with 1 participant and 3 participants over HTTP
+    for (const count of [1, 3]) {
+      const r = await postJson("/api/rooms", {
+        name: "P1",
+        surah_number: 112,
+        surah_name: "Al-Ikhlas",
+      });
+      assert.equal(r.status, 200);
+      assert.equal(r.body.total_ayahs, 4);
+      const roomCode = r.body.code;
+      const devices = [r.body.device_id];
+      for (let p = 2; p <= count; p += 1) {
+        const j = await postJson(`/api/rooms/${roomCode}/join`, { name: `P${p}` });
+        assert.equal(j.status, 200);
+        devices.push(j.body.device_id);
+      }
+      const st = await postJson(`/api/rooms/${roomCode}/start`, { device_id: devices[0] });
+      assert.equal(st.status, 200);
+
+      for (let step = 0; step < 4; step += 1) {
+        const adv = await postJson(`/api/rooms/${roomCode}/advance`, {
+          device_id: devices[step % count],
+        });
+        assert.equal(adv.status, 200);
+        if (step < 3) {
+          assert.equal(adv.body.status, "active");
+          assert.equal(adv.body.ayah_index, step + 1);
+        } else {
+          assert.equal(adv.body.status, "finished");
+          assert.equal(adv.body.ayah_index, 3);
+        }
+      }
+      const afterDone = await postJson(`/api/rooms/${roomCode}/advance`, { device_id: devices[0] });
+      assert.equal(afterDone.status, 400);
+    }
   } finally {
     child.kill("SIGTERM");
     await new Promise((resolve) => {

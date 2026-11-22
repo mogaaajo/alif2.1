@@ -99,8 +99,10 @@ const GroupRoom = () => {
     };
   }, [code, deviceId]);
 
+  const isFinished = room?.status === "finished" || room?.status === "done";
+
   useEffect(() => {
-    if ((room?.status === "active" || room?.status === "done") && !surahData) {
+    if ((room?.status === "active" || isFinished) && !surahData) {
       getSurah(room.surah_number, reciter, translation).then(setSurahData).catch(() => {});
     }
   }, [room?.status, room?.surah_number]); // eslint-disable-line
@@ -110,7 +112,17 @@ const GroupRoom = () => {
   const n = participants.length;
   const turnOwner = n ? participants[room.turn_index % n] : null;
   const myTurn = turnOwner && turnOwner.device_id === deviceId;
+  const totalAyahs = surahData?.ayahs?.length || room?.total_ayahs || 0;
+  const displayedAyahNumber =
+    totalAyahs > 0
+      ? Math.min(Math.max(1, (room?.ayah_index ?? 0) + 1), totalAyahs)
+      : (room?.ayah_index ?? 0) + 1;
+  const isFinalAyah = totalAyahs > 0 && (room?.ayah_index ?? 0) + 1 >= totalAyahs;
   const currentAyah = surahData?.ayahs?.[room?.ayah_index];
+  const isOutOfBounds = Boolean(
+    room?.status === "active" &&
+      ((totalAyahs > 0 && (room?.ayah_index ?? 0) >= totalAyahs) || (surahData && !currentAyah))
+  );
   const myName = () => participants.find((p) => p.device_id === deviceId)?.name || "";
 
   const stopStreamTracks = () => {
@@ -211,7 +223,7 @@ const GroupRoom = () => {
   };
 
   const startRec = async () => {
-    if (!myTurn || room?.status !== "active" || turnPhase !== "idle") return;
+    if (!myTurn || room?.status !== "active" || turnPhase !== "idle" || !currentAyah || isOutOfBounds) return;
     const gen = ++attemptGenRef.current;
     const attempt = {
       eventId: makeEventId(),
@@ -472,9 +484,15 @@ const GroupRoom = () => {
             <div className="mb-6">
               <div className="mb-2 flex items-center justify-between text-xs text-muted-foreground">
                 <span>{room.surah_name}</span>
-                <span>Ayah {room.ayah_index + 1}</span>
+                <span>
+                  Ayah {displayedAyahNumber}
+                  {totalAyahs > 0 ? ` of ${totalAyahs}` : ""}
+                </span>
               </div>
-              <Progress value={surahData ? ((room.ayah_index + 1) / surahData.ayahs.length) * 100 : 0} className="h-1.5" />
+              <Progress
+                value={totalAyahs > 0 ? Math.min(100, (displayedAyahNumber / totalAyahs) * 100) : 0}
+                className="h-1.5"
+              />
             </div>
 
             <div className="mb-6 flex flex-wrap items-center justify-center gap-2">
@@ -516,7 +534,7 @@ const GroupRoom = () => {
               <div className="flex justify-center py-16">
                 <Loader2 className="h-7 w-7 animate-spin text-primary" />
               </div>
-            ) : (
+            ) : currentAyah && !isOutOfBounds ? (
               <AnimatePresence mode="wait">
                 <motion.div
                   key={room.ayah_index}
@@ -527,15 +545,16 @@ const GroupRoom = () => {
                   className="rounded-2xl border border-border bg-card px-5 py-12 sm:px-10"
                 >
                   <p className="font-arabic text-center text-4xl leading-[2] text-foreground sm:text-5xl" dir="rtl">
-                    {currentAyah?.arabic}
+                    {currentAyah.arabic}
                   </p>
-                  {currentAyah?.translation && (
+                  {currentAyah.translation && (
                     <p className="mt-6 text-center text-sm text-muted-foreground">{currentAyah.translation}</p>
                   )}
                 </motion.div>
               </AnimatePresence>
-            )}
+            ) : null}
 
+            {!isOutOfBounds && (
             <div className="mt-8 flex flex-col items-center gap-4">
               {myTurn ? (
                 <>
@@ -548,9 +567,15 @@ const GroupRoom = () => {
                       <div className="flex flex-wrap justify-center gap-3">
                         <Button className="rounded-full px-6" onClick={() => advance()} disabled={busy} data-testid="room-done-btn">
                           {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                          Pass turn
+                          {isFinalAyah ? "Finish surah" : "Pass turn"}
                         </Button>
-                        <Button variant="outline" className="rounded-full px-6" onClick={startRec} data-testid="room-record-btn">
+                        <Button
+                          variant="outline"
+                          className="rounded-full px-6"
+                          onClick={startRec}
+                          disabled={!currentAyah}
+                          data-testid="room-record-btn"
+                        >
                           <Mic className="mr-2 h-4 w-4" /> Practice aloud (mic)
                         </Button>
                       </div>
@@ -598,7 +623,7 @@ const GroupRoom = () => {
                         </p>
                         <Button className="mt-4 w-full rounded-full" onClick={() => advance()} disabled={busy} data-testid="room-pass-btn">
                           {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                          Pass turn
+                          {isFinalAyah ? "Finish surah" : "Pass turn"}
                         </Button>
                       </div>
                     );
@@ -611,11 +636,12 @@ const GroupRoom = () => {
                 </p>
               )}
             </div>
+            )}
           </div>
         )}
 
-        {/* DONE */}
-        {room?.status === "done" && (
+        {/* DONE / FINISHED */}
+        {isFinished && (
           <div className="py-14 text-center" data-testid="room-done">
             <span className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-primary/10 text-primary">
               <PartyPopper className="h-8 w-8" />

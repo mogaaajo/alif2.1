@@ -17,6 +17,99 @@ export const makeGroupTurnCreditKey = (room, turnIndex, ayahIndex, deviceId) => 
   return `${roomIdentity}:${turnIndex}:${ayahIndex}:${deviceId}`;
 };
 
+// Authoritative Hafs/Madani Quran verse counts (1-indexed: indices 1..114 = Al-Fatiha..An-Nas; total = 6,236).
+// Cross-verified 114/114 against https://api.alquran.cloud/v1/surah and https://api.quran.com/api/v4/chapters.
+export const SURAH_AYAH_COUNTS = Object.freeze([
+  0,
+  7, 286, 200, 176, 120, 165, 206, 75, 129, 109,
+  123, 111, 43, 52, 99, 128, 111, 110, 98, 135,
+  112, 78, 118, 64, 77, 227, 93, 88, 69, 60,
+  34, 30, 73, 54, 45, 83, 182, 88, 75, 85,
+  54, 53, 89, 59, 37, 35, 38, 29, 18, 45,
+  60, 49, 62, 55, 78, 96, 29, 22, 24, 13,
+  14, 11, 11, 18, 12, 12, 30, 52, 52, 44,
+  28, 28, 20, 56, 40, 31, 50, 40, 46, 42,
+  29, 19, 36, 25, 22, 17, 19, 26, 30, 20,
+  15, 21, 11, 8, 8, 19, 5, 8, 8, 11,
+  11, 8, 3, 9, 5, 4, 7, 3, 6, 3,
+  5, 4, 5, 6,
+]);
+
+export const getSurahAyahCount = (surahNumber) => {
+  if (
+    typeof surahNumber !== "number" ||
+    !Number.isInteger(surahNumber) ||
+    surahNumber < 1 ||
+    surahNumber > 114
+  ) {
+    return null;
+  }
+  return SURAH_AYAH_COUNTS[surahNumber];
+};
+
+export const parseValidSurahNumber = (value) => {
+  if (typeof value === "number") {
+    return getSurahAyahCount(value) !== null ? value : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!/^\d+$/.test(trimmed)) return null;
+    const parsed = Number(trimmed);
+    return getSurahAyahCount(parsed) !== null ? parsed : null;
+  }
+  return null;
+};
+
+export const resolveRoomTotalAyahs = (room) => {
+  const validSurah = parseValidSurahNumber(room?.surah_number);
+  if (validSurah === null) return null;
+  const verified = SURAH_AYAH_COUNTS[validSurah];
+  if (isPositiveInteger(room?.total_ayahs)) {
+    return Math.min(room.total_ayahs, verified);
+  }
+  return verified;
+};
+
+export function advanceGroupRoomTurn({
+  room,
+  deviceId,
+  nowIso = () => new Date().toISOString(),
+}) {
+  if (!room) {
+    return { ok: false, status: 404, detail: "Room not found" };
+  }
+  if (room.status !== "active") {
+    return { ok: false, status: 400, detail: "Session is not active" };
+  }
+  const participants = Array.isArray(room.participants) ? room.participants : [];
+  if (participants.length === 0) {
+    return { ok: false, status: 409, detail: "Group room has no active participants" };
+  }
+  const currentOwner = participants[room.turn_index % participants.length]?.device_id;
+  if (!isNonEmptyString(deviceId) || currentOwner !== deviceId) {
+    return { ok: false, status: 403, detail: "It is not your turn" };
+  }
+
+  const totalAyahs = resolveRoomTotalAyahs(room);
+  if (totalAyahs === null) {
+    return { ok: false, status: 409, detail: "Group room has invalid surah metadata" };
+  }
+
+  room.total_ayahs = totalAyahs;
+
+  if (!isNonNegativeInteger(room.ayah_index) || room.ayah_index + 1 >= totalAyahs) {
+    room.status = "finished";
+    room.ayah_index = totalAyahs - 1;
+    room.updated_at = nowIso();
+    return { ok: true, status: 200, room, finished: true };
+  }
+
+  room.ayah_index += 1;
+  room.turn_index += 1;
+  room.updated_at = nowIso();
+  return { ok: true, status: 200, room, finished: false };
+}
+
 export function validateGroupPracticeTurn({
   activity,
   rooms,
@@ -115,7 +208,8 @@ export function validateGroupPracticeTurn({
   }
 
   const roomSurah = Number(room.surah_number);
-  if (!isPositiveInteger(roomSurah) || roomSurah > 114 || roomSurah !== surahNumber) {
+  const verifiedSurahAyahCount = getSurahAyahCount(roomSurah);
+  if (verifiedSurahAyahCount === null || roomSurah !== surahNumber) {
     return {
       ok: false,
       status: 409,
@@ -123,8 +217,13 @@ export function validateGroupPracticeTurn({
     };
   }
 
+  const roomTotalAyahs = resolveRoomTotalAyahs(room) ?? verifiedSurahAyahCount;
+  const effectiveMaxAyahs = isPositiveInteger(maxAyahCount)
+    ? Math.min(maxAyahCount, roomTotalAyahs)
+    : roomTotalAyahs;
+
   const expectedAyahNumber = room.ayah_index + 1;
-  if (isPositiveInteger(maxAyahCount) && expectedAyahNumber > maxAyahCount) {
+  if (expectedAyahNumber > effectiveMaxAyahs) {
     return {
       ok: false,
       status: 409,

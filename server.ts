@@ -6,7 +6,12 @@ import crypto from 'node:crypto';
 import multer from 'multer';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'node:url';
-import { commitPracticeActivity } from './src/lib/groupTurnGuard.mjs';
+import {
+  commitPracticeActivity,
+  getSurahAyahCount,
+  parseValidSurahNumber,
+  advanceGroupRoomTurn,
+} from './src/lib/groupTurnGuard.mjs';
 
 dotenv.config();
 
@@ -128,6 +133,7 @@ interface RoomDoc {
   host_device: string;
   surah_number: number;
   surah_name: string;
+  total_ayahs: number;
   participants: Array<{ device_id: string; name: string }>;
   status: 'lobby' | 'active' | 'finished';
   ayah_index: number;
@@ -1117,7 +1123,12 @@ apiRouter.get('/classes/assignments', (req, res) => {
 
 // Group recitation rooms
 apiRouter.post('/rooms', (req, res) => {
-  const { name, surah_number, surah_name } = req.body;
+  const { name, surah_number, surah_name } = req.body || {};
+  const validSurahNumber = parseValidSurahNumber(surah_number);
+  if (validSurahNumber === null) {
+    return res.status(400).json({ detail: 'Valid surah_number (1-114) is required' });
+  }
+  const total_ayahs = getSurahAyahCount(validSurahNumber)!;
   const device_id = crypto.randomUUID();
   let code = Math.random().toString(36).substring(2, 7).toUpperCase();
   while (rooms.has(code)) {
@@ -1128,8 +1139,9 @@ apiRouter.post('/rooms', (req, res) => {
     instance_id: crypto.randomUUID(),
     code,
     host_device: device_id,
-    surah_number: Number(surah_number),
+    surah_number: validSurahNumber,
     surah_name: surah_name || '',
+    total_ayahs,
     participants: [{ device_id, name: name || 'Host' }],
     status: 'lobby',
     ayah_index: 0,
@@ -1185,20 +1197,16 @@ apiRouter.post('/rooms/:code/advance', (req, res) => {
   const { device_id } = req.body || {};
   const room = rooms.get(code);
 
-  if (!room) return res.status(404).json({ detail: 'Room not found' });
-  if (room.status !== 'active') return res.status(400).json({ detail: 'Session is not active' });
-
-  const n = room.participants.length;
-  const currentOwner = room.participants[room.turn_index % n]?.device_id;
-  if (currentOwner !== device_id) {
-    return res.status(403).json({ detail: 'It is not your turn' });
+  const result = advanceGroupRoomTurn({
+    room,
+    deviceId: device_id,
+    nowIso: () => new Date().toISOString(),
+  });
+  if (!result.ok) {
+    return res.status(result.status).json({ detail: result.detail });
   }
 
-  room.ayah_index += 1;
-  room.turn_index += 1;
-  room.updated_at = new Date().toISOString();
-
-  res.json(room);
+  res.json(result.room);
 });
 
 // Mount /api router
